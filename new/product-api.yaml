@@ -1,0 +1,134 @@
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: product-api-service
+spec:
+  selector:
+    app: product-api
+  ports:
+    - name: http
+      protocol: TCP
+      port: 9090
+      targetPort: 9090
+
+---
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: product-api
+automountServiceAccountToken: true
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-configmap
+data:
+  config: |
+    {
+      "db_connection": "host=postgres.query.consul port=5432 user=postgres password=password dbname=products sslmode=disable",
+      "bind_address": ":9090",
+      "metrics_address": ":9103"
+    }
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: product-api-init
+data:
+  config: |
+    cat <<EOF > /app/service.json
+    {
+      "Name": "product-api",
+      "Tags": ["application","production"],
+      "Address": "${POD_IP}",
+      "Port": 9090,
+      "Check": {
+        "DeregisterCriticalServiceAfter": "1m",
+        "Method": "GET",
+        "HTTP": "http://${POD_IP}:9090/coffees",
+        "Interval": "5s",
+        "Timeout": "4s"
+      }
+    }
+    EOF
+
+---
+
+# Product API
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-api
+  labels:
+    app: product-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: product-api
+  template:
+    metadata:
+      labels:
+        app: product-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9102"
+    spec:
+      serviceAccountName: product-api
+      volumes:
+      - name: config
+        configMap:
+          name: db-configmap
+          items:
+          - key: config
+            path: conf.json
+      - name: consul-init
+        configMap:
+          name: product-api-init
+          items:
+          - key: config
+            path: service.sh
+      containers:
+        - name: product-api
+          image: hashicorpdemoapp/product-api:v0.0.11
+          ports:
+            - containerPort: 9090
+            - containerPort: 9103
+          env:
+            - name: "CONFIG_FILE"
+              value: "/config/conf.json"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 15
+            timeoutSeconds: 1
+            periodSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+      initContainers:
+        - name: consul-init
+          image: ppresto/consul-init:0.2.9
+          volumeMounts:
+            - name: consul-init
+              mountPath: /consul
+              readOnly: false
+          env:
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: HOST_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.hostIP
